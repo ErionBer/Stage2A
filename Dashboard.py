@@ -7,6 +7,7 @@ import numpy as np
 
 duckdb.sql("PRAGMA threads=2;")
 duckdb.sql("PRAGMA memory_limit='500MB';")
+duckdb.sql("PRAGMA temp_directory='duckdb_swap_space';")
 # ---------------------------------------------------------
 # 1. CONFIGURATION DE LA PAGE
 # ---------------------------------------------------------
