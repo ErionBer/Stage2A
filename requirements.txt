@@ -1,6 +1,7 @@
 streamlit
 pandas
 plotly
-duckdb
+SQLAlchemy
+psycopg2-binary
 numpy
 pyarrow
