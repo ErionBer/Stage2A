@@ -463,6 +463,11 @@ def first_existing_expr(alias: str, available_cols: set[str], candidates: list[s
 def load_all_data():
     conn = duckdb.connect()
 
+    conn.execute("PRAGMA threads=2;")
+    conn.execute("PRAGMA memory_limit='400MB';")
+    # On force DuckDB à utiliser le disque dur si la RAM est pleine
+    conn.execute("PRAGMA temp_directory='duckdb_swap';")
+
     chemins = {key: parquet_path(filename) for key, filename in PARQUET_FILES.items()}
 
     try:
