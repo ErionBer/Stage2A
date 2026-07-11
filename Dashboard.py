@@ -407,7 +407,7 @@ def trouver_coord_departement(dept_raw: str):
 # ---------------------------------------------------------
 # Dossier contenant les 6 fichiers .parquet du modèle en étoile.
 # À modifier seulement si tes fichiers ne sont pas dans ce dossier.
-PARQUET_DIR = "G:/Mon Drive/Stage/embedding"
+PARQUET_DIR = "data"
 
 
 # Nom exact des fichiers Parquet attendus.
