@@ -536,103 +536,106 @@ def load_all_data():
     where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
     query_faits = f"""
+    WITH base_faits AS (
+        SELECT 
+            -- Table de faits
+            {fait_id_occurrence} AS id_occurrence,
+            {fait_lemme} AS lemme_detecte,
+            {fait_contexte} AS contexte,
+            {fait_label} AS label_ia,
+            {fait_score} AS score_ia,
+            {fait_cluster_id} AS ia_cluster_id,
+            {fait_coord_x} AS ia_coord_x,
+            {fait_coord_y} AS ia_coord_y,
+            {fait_statut} AS ia_filtre_statut,
+            {fait_rhetorique} AS est_rhetorique_migratoire,
+
+            -- Orateur
+            f.id_orateur,
+            {orateur_nom} AS nom_orateur,
+            {orateur_naissance} AS date_naissance,
+            {orateur_deces} AS date_deces,
+
+            -- Mandat
+            f.id_mandat,
+            {mandat_leg} AS num_legislature,
+            {mandat_groupe} AS grp_politique,
+            
+            -- ÉTAPE 1 : On nettoie la famille (Les faux vides deviennent des vrais NULL)
+            CASE WHEN {mandat_famille} IN ('Non renseignée / Autres', 'Non renseigné', 'NULL', '') THEN NULL 
+                 ELSE {mandat_famille} END AS famille_brute,
+            
+            {mandat_dept} AS departement,
+
+            -- Temps (TRY_CAST évite les erreurs si le texte est bizarre)
+            f.id_date,
+            {temps_date} AS date_seance,
+            TRY_CAST({temps_annee} AS INTEGER) AS annee,
+            {temps_mois} AS mois,
+
+            -- Thème
+            f.id_theme,
+            {theme_libelle} AS libelle_theme,
+            {theme_libelle} AS theme,
+
+            -- Séance
+            f.id_seance,
+            {seance_source} AS nom_fichier_source,
+            {seance_type} AS type_seance
+
+        FROM read_parquet('{sql_string(chemins["faits"])}') f
+        LEFT JOIN read_parquet('{sql_string(chemins["orateurs"])}') o 
+            ON regexp_extract(CAST(f.id_orateur AS VARCHAR), '\\d+') = regexp_extract(CAST(o.id_orateur AS VARCHAR), '\\d+')
+        LEFT JOIN read_parquet('{sql_string(chemins["mandats"])}') m 
+            ON f.id_mandat = m.id_mandat
+        LEFT JOIN read_parquet('{sql_string(chemins["temps"])}') t 
+            ON f.id_date = t.id_date
+        LEFT JOIN read_parquet('{sql_string(chemins["theme"])}') th 
+            ON f.id_theme = th.id_theme
+        LEFT JOIN read_parquet('{sql_string(chemins["seance"])}') s 
+            ON f.id_seance = s.id_seance
+        {where_sql}
+    )
     SELECT 
-        -- Table de faits
-        {fait_id_occurrence} AS id_occurrence,
-        {fait_lemme} AS lemme_detecte,
-        {fait_contexte} AS contexte,
-        {fait_label} AS label_ia,
-        {fait_score} AS score_ia,
-        {fait_cluster_id} AS ia_cluster_id,
-        {fait_coord_x} AS ia_coord_x,
-        {fait_coord_y} AS ia_coord_y,
-        {fait_statut} AS ia_filtre_statut,
-        {fait_rhetorique} AS est_rhetorique_migratoire,
-
-        -- Orateur
-        f.id_orateur,
-        {orateur_nom} AS nom_orateur,
-        {orateur_naissance} AS date_naissance,
-        {orateur_deces} AS date_deces,
-
-        -- Mandat
-        f.id_mandat,
-        {mandat_leg} AS num_legislature,
-        {mandat_groupe} AS grp_politique,
-        {mandat_famille} AS famille_politique, -- CORRECTION BUG 1 APPLIQUÉE ICI
-        {mandat_dept} AS departement,
-
-        -- Temps
-        f.id_date,
-        {temps_date} AS date_seance,
-        {temps_annee} AS annee,
-        {temps_mois} AS mois,
-
-        -- Thème
-        f.id_theme,
-        {theme_libelle} AS libelle_theme,
-        {theme_libelle} AS theme,
-
-        -- Séance
-        f.id_seance,
-        {seance_source} AS nom_fichier_source,
-        {seance_type} AS type_seance
-
-    FROM read_parquet('{sql_string(chemins["faits"])}') f
-    
-    -- CORRECTION BUG 3 : La jointure sécurisée par REGEX pour l'orateur !
-    LEFT JOIN read_parquet('{sql_string(chemins["orateurs"])}') o 
-        ON regexp_extract(CAST(f.id_orateur AS VARCHAR), '\\d+') = regexp_extract(CAST(o.id_orateur AS VARCHAR), '\\d+')
-        
-    LEFT JOIN read_parquet('{sql_string(chemins["mandats"])}') m 
-        ON f.id_mandat = m.id_mandat
-    LEFT JOIN read_parquet('{sql_string(chemins["temps"])}') t 
-        ON f.id_date = t.id_date
-    LEFT JOIN read_parquet('{sql_string(chemins["theme"])}') th 
-        ON f.id_theme = th.id_theme
-    LEFT JOIN read_parquet('{sql_string(chemins["seance"])}') s 
-        ON f.id_seance = s.id_seance
-    {where_sql}
-    LIMIT 100000
+        *,
+        -- ☢️ ARME NUCLÉAIRE : LA MAGIE TEMPORELLE EN PUR SQL ☢️
+        COALESCE(
+            -- Équivalent de ffill() : On regarde le dernier mandat connu dans le passé
+            LAST_VALUE(famille_brute IGNORE NULLS) OVER (
+                PARTITION BY id_orateur ORDER BY annee 
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ),
+            -- Équivalent de bfill() : S'il est vide, on regarde le 1er mandat connu dans le futur
+            FIRST_VALUE(famille_brute IGNORE NULLS) OVER (
+                PARTITION BY id_orateur ORDER BY annee 
+                ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+            ),
+            -- S'il est vraiment inconnu toute sa vie
+            'Non renseignée / Autres'
+        ) AS famille_politique
+    FROM base_faits
+    ORDER BY id_orateur, annee
+    LIMIT 75000;
     """
 
     try:
+        # Pandas reçoit un plateau d'argent : les données sont DÉJÀ triées et remplies !
         df_faits = conn.execute(query_faits).df()
     except Exception as e:
         conn.close()
         st.error("Erreur pendant la jointure des tables Parquet avec DuckDB.")
         st.stop()
 
-    # 1. On transforme les "faux vides" en vrais NaN pour Pandas
-    df_faits["famille_politique"] = df_faits["famille_politique"].replace(
-        ["Non renseignée / Autres", "Non renseigné", "NULL", "", None], np.nan
-    )
-
-    # 2. CRUCIAL : On trie par Orateur ET par Année pour respecter l'histoire !
-    # On s'assure d'abord que l'année est bien un nombre
-    df_faits["annee"] = pd.to_numeric(df_faits["annee"], errors="coerce")
-    df_faits = df_faits.sort_values(by=["id_orateur", "annee"])
-
-    # 3. LA MAGIE TEMPORELLE : ffill (vers le futur) puis bfill (vers le passé)
-    df_faits["famille_politique"] = (
-        df_faits.groupby("id_orateur")["famille_politique"]
-        .ffill()  # Si vide, prend le parti du mandat précédent
-        .bfill()  # Si toujours vide, prend le parti du mandat suivant
-    )
-
-    # 4. S'il reste des orateurs 100% inconnus sur toute leur vie, on les met dans Autres
-    df_faits["famille_politique"] = df_faits["famille_politique"].fillna("Non renseignée / Autres")
-
-    # Nettoyage minimal pour éviter les erreurs dans les filtres et graphiques.
-    df_faits["famille_politique"] = df_faits["famille_politique"].fillna("Non renseignée / Autres")
+    # Nettoyage minimal ultra-rapide (les grosses opérations ont été faites en base)
     df_faits["grp_politique"] = df_faits["grp_politique"].fillna("Non renseigné")
     df_faits["nom_orateur"] = df_faits["nom_orateur"].fillna("Inconnu")
     df_faits["departement"] = df_faits["departement"].fillna("Inconnu")
     df_faits["libelle_theme"] = df_faits["libelle_theme"].fillna("Non renseigné")
     df_faits["theme"] = df_faits["theme"].fillna(df_faits["libelle_theme"])
     df_faits["score_ia"] = pd.to_numeric(df_faits["score_ia"], errors="coerce").fillna(0)
-    df_faits["annee"] = pd.to_numeric(df_faits["annee"], errors="coerce")
 
+    # Table complète des mandats pour la fiche député.
+    # ... (Laisse ton code query_mandats tel quel juste en dessous) ...
     # Table complète des mandats pour la fiche député.
     mandat_date_debut = first_existing_expr("m", cols_m, ["debut_mandat", "date_debut_mandat", "date_debut"], "NULL")
     mandat_date_fin = first_existing_expr("m", cols_m, ["fin_mandat", "date_fin_mandat", "date_fin"], "NULL")
