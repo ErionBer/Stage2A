@@ -4,6 +4,9 @@ import duckdb
 import plotly.express as px
 import unicodedata
 import numpy as np
+
+duckdb.sql("PRAGMA threads=2;")
+duckdb.sql("PRAGMA memory_limit='500MB';")
 # ---------------------------------------------------------
 # 1. CONFIGURATION DE LA PAGE
 # ---------------------------------------------------------
