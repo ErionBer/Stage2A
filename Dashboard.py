@@ -463,7 +463,7 @@ def load_all_data():
     # 3. La requête SQL directement sur Supabase
     query_faits = """
     SELECT 
-        f.id_occurrence, f.lemme_detecte, f.contexte, f.score_ia, f.ia_cluster_id,
+        f.id_occurrence, f.lemme_detecte, f.contexte, f.score_ia, f.cluster_id,
         o.nom_orateur, 
         m.grp_politique, m.famille_politique, m.departement,
         t.annee,
