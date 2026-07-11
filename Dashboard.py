@@ -459,211 +459,43 @@ def first_existing_expr(alias: str, available_cols: set[str], candidates: list[s
     return default_sql
 
 
-@st.cache_data()
+@st.cache_data(ttl="1h") 
 def load_all_data():
-    conn = duckdb.connect()
-
-    conn.execute("PRAGMA threads=2;")
-    conn.execute("PRAGMA memory_limit='400MB';")
-    # On force DuckDB à utiliser le disque dur si la RAM est pleine
-    conn.execute("PRAGMA temp_directory='duckdb_swap';")
-
-    chemins = {key: parquet_path(filename) for key, filename in PARQUET_FILES.items()}
-
-    try:
-        cols_f = get_parquet_columns(conn, chemins["faits"])
-        cols_o = get_parquet_columns(conn, chemins["orateurs"])
-        cols_m = get_parquet_columns(conn, chemins["mandats"])
-        cols_t = get_parquet_columns(conn, chemins["temps"])
-        cols_th = get_parquet_columns(conn, chemins["theme"])
-        cols_s = get_parquet_columns(conn, chemins["seance"])
-    except Exception as e:
-        conn.close()
-        st.error(
-            "Impossible de lire les fichiers Parquet. Vérifie le chemin PARQUET_DIR "
-            "et le nom exact des 6 fichiers .parquet."
-        )
-        st.exception(e)
-        st.stop()
-
-    # Colonnes de faits
-    fait_id_occurrence = first_existing_expr("f", cols_f, ["id_occurrence", "Id_occurence", "Id_occurrence"], "NULL")
-    fait_lemme = first_existing_expr("f", cols_f, ["lemme_detecte", "lemme", "mot_cle"], "NULL")
-    fait_contexte = first_existing_expr("f", cols_f, ["contexte", "context"], "NULL")
-    fait_score = first_existing_expr("f", cols_f, ["score_ia", "ia_score_pertinence", "score_pertinence"], "0.0")
-    fait_label = first_existing_expr("f", cols_f, ["label_ia", "ia_cluster_nom", "cluster_nom"], "NULL")
-    fait_cluster_id = first_existing_expr("f", cols_f, ["ia_cluster_id", "cluster_id"], "NULL")
-    fait_coord_x = first_existing_expr("f", cols_f, ["ia_coord_x", "coord_x"], "NULL")
-    fait_coord_y = first_existing_expr("f", cols_f, ["ia_coord_y", "coord_y"], "NULL")
-    fait_statut = first_existing_expr("f", cols_f, ["ia_filtre_statut", "filtre_statut"], "NULL")
-    fait_rhetorique = first_existing_expr("f", cols_f, ["est_rhetorique_migratoire", "est_rhétorique_migratoire"], "NULL")
-
-    # Dimensions
-    orateur_nom = first_existing_expr("o", cols_o, ["nom", "nom_orateur", "nom_canonical_orateur"], "NULL")
-    orateur_naissance = first_existing_expr("o", cols_o, ["date_naissance"], "NULL")
-    orateur_deces = first_existing_expr("o", cols_o, ["date_deces"], "NULL")
-
-    mandat_leg = first_existing_expr("m", cols_m, ["num_legislature", "legislature"], "NULL")
     
-    # CORRECTION BUG 1 : On sépare bien le groupe politique de la famille politique !
-    mandat_groupe = first_existing_expr("m", cols_m, ["grp_politique", "groupe_politique"], "NULL")
-    mandat_famille = first_existing_expr("m", cols_m, ["famille_politique"], "NULL")
-    
-    mandat_dept = first_existing_expr("m", cols_m, ["dpt", "departement", "département"], "NULL")
-
-    temps_date = first_existing_expr("t", cols_t, ["date_seance", "date"], "NULL")
-    temps_annee = first_existing_expr("t", cols_t, ["annee", "année"], "NULL")
-    temps_mois = first_existing_expr("t", cols_t, ["mois"], "NULL")
-
-    theme_libelle = first_existing_expr("th", cols_th, ["libelle_theme", "theme", "libellé_theme"], "NULL")
-
-    seance_source = first_existing_expr("s", cols_s, ["nom_fichier_source", "source_fichier", "fichier_source"], "NULL")
-    seance_type = first_existing_expr("s", cols_s, ["type_seance", "type_séance"], "NULL")
-
-    # Filtre
-    where_clauses = []
-    if "est_rhetorique_migratoire" in cols_f:
-        where_clauses.append("LOWER(CAST(f.est_rhetorique_migratoire AS VARCHAR)) IN ('true', '1', 'oui')")
-    elif "est_rhétorique_migratoire" in cols_f:
-        where_clauses.append("LOWER(CAST(f.\"est_rhétorique_migratoire\" AS VARCHAR)) IN ('true', '1', 'oui')")
-
-    if "ia_filtre_statut" in cols_f:
-        where_clauses.append("COALESCE(f.ia_filtre_statut, 'retenu') = 'retenu'")
-
-    if "ia_cluster_id" in cols_f:
-        where_clauses.append("COALESCE(f.ia_cluster_id, 0) <> -1")
-
-    where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
-
-    query_faits = f"""
-    WITH base_faits AS (
-        SELECT 
-            -- Table de faits
-            {fait_id_occurrence} AS id_occurrence,
-            {fait_lemme} AS lemme_detecte,
-            {fait_contexte} AS contexte,
-            {fait_label} AS label_ia,
-            {fait_score} AS score_ia,
-            {fait_cluster_id} AS ia_cluster_id,
-            {fait_coord_x} AS ia_coord_x,
-            {fait_coord_y} AS ia_coord_y,
-            {fait_statut} AS ia_filtre_statut,
-            {fait_rhetorique} AS est_rhetorique_migratoire,
-
-            -- Orateur
-            f.id_orateur,
-            {orateur_nom} AS nom_orateur,
-            {orateur_naissance} AS date_naissance,
-            {orateur_deces} AS date_deces,
-
-            -- Mandat
-            f.id_mandat,
-            {mandat_leg} AS num_legislature,
-            {mandat_groupe} AS grp_politique,
-            
-            -- ÉTAPE 1 : On nettoie la famille (Les faux vides deviennent des vrais NULL)
-            CASE WHEN {mandat_famille} IN ('Non renseignée / Autres', 'Non renseigné', 'NULL', '') THEN NULL 
-                 ELSE {mandat_famille} END AS famille_brute,
-            
-            {mandat_dept} AS departement,
-
-            -- Temps (TRY_CAST évite les erreurs si le texte est bizarre)
-            f.id_date,
-            {temps_date} AS date_seance,
-            TRY_CAST({temps_annee} AS INTEGER) AS annee,
-            {temps_mois} AS mois,
-
-            -- Thème
-            f.id_theme,
-            {theme_libelle} AS libelle_theme,
-            {theme_libelle} AS theme,
-
-            -- Séance
-            f.id_seance,
-            {seance_source} AS nom_fichier_source,
-            {seance_type} AS type_seance
-
-        FROM read_parquet('{sql_string(chemins["faits"])}') f
-        LEFT JOIN read_parquet('{sql_string(chemins["orateurs"])}') o 
-            ON regexp_extract(CAST(f.id_orateur AS VARCHAR), '\\d+') = regexp_extract(CAST(o.id_orateur AS VARCHAR), '\\d+')
-        LEFT JOIN read_parquet('{sql_string(chemins["mandats"])}') m 
-            ON f.id_mandat = m.id_mandat
-        LEFT JOIN read_parquet('{sql_string(chemins["temps"])}') t 
-            ON f.id_date = t.id_date
-        LEFT JOIN read_parquet('{sql_string(chemins["theme"])}') th 
-            ON f.id_theme = th.id_theme
-        LEFT JOIN read_parquet('{sql_string(chemins["seance"])}') s 
-            ON f.id_seance = s.id_seance
-        {where_sql}
-    )
+    # 3. La requête SQL directement sur Supabase
+    query_faits = """
     SELECT 
-        *,
-        -- ☢️ ARME NUCLÉAIRE : LA MAGIE TEMPORELLE EN PUR SQL ☢️
-        COALESCE(
-            -- Équivalent de ffill() : On regarde le dernier mandat connu dans le passé
-            LAST_VALUE(famille_brute IGNORE NULLS) OVER (
-                PARTITION BY id_orateur ORDER BY annee 
-                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-            ),
-            -- Équivalent de bfill() : S'il est vide, on regarde le 1er mandat connu dans le futur
-            FIRST_VALUE(famille_brute IGNORE NULLS) OVER (
-                PARTITION BY id_orateur ORDER BY annee 
-                ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
-            ),
-            -- S'il est vraiment inconnu toute sa vie
-            'Non renseignée / Autres'
-        ) AS famille_politique
-    FROM base_faits
-    ORDER BY id_orateur, annee
-    LIMIT 75000;
+        f.id_occurrence, f.lemme_detecte, f.contexte, f.score_ia, f.ia_cluster_id,
+        o.nom_orateur, 
+        m.grp_politique, m.famille_politique, m.departement,
+        t.annee,
+        th.libelle_theme
+    FROM faits_occurrences f
+    LEFT JOIN dim_orateurs o ON regexp_replace(CAST(f.id_orateur AS TEXT), '\\D', '', 'g') = regexp_replace(CAST(o.id_orateur AS TEXT), '\\D', '', 'g')
+    LEFT JOIN dim_mandats m ON f.id_mandat = m.id_mandat
+    LEFT JOIN dim_temps t ON f.id_date = t.id_date
+    LEFT JOIN dim_theme th ON f.id_theme = th.id_theme;
     """
 
-    try:
-        # Pandas reçoit un plateau d'argent : les données sont DÉJÀ triées et remplies !
-        df_faits = conn.execute(query_faits).df()
-    except Exception as e:
-        conn.close()
-        st.error("Erreur pendant la jointure des tables Parquet avec DuckDB.")
-        st.stop()
+    # Streamlit envoie la requête à Supabase et récupère un DataFrame
+    df_faits = conn.query(query_faits)
 
-    # Nettoyage minimal ultra-rapide (les grosses opérations ont été faites en base)
+    # --- Nettoyage pour les graphiques ---
     df_faits["grp_politique"] = df_faits["grp_politique"].fillna("Non renseigné")
+    df_faits["famille_politique"] = df_faits["famille_politique"].replace(["Non renseignée / Autres", "Non renseigné", "NULL", "", None], np.nan)
+    df_faits["famille_politique"] = df_faits["famille_politique"].fillna("Non renseignée / Autres")
     df_faits["nom_orateur"] = df_faits["nom_orateur"].fillna("Inconnu")
     df_faits["departement"] = df_faits["departement"].fillna("Inconnu")
     df_faits["libelle_theme"] = df_faits["libelle_theme"].fillna("Non renseigné")
-    df_faits["theme"] = df_faits["theme"].fillna(df_faits["libelle_theme"])
     df_faits["score_ia"] = pd.to_numeric(df_faits["score_ia"], errors="coerce").fillna(0)
 
-    # Table complète des mandats pour la fiche député.
-    # ... (Laisse ton code query_mandats tel quel juste en dessous) ...
-    # Table complète des mandats pour la fiche député.
-    mandat_date_debut = first_existing_expr("m", cols_m, ["debut_mandat", "date_debut_mandat", "date_debut"], "NULL")
-    mandat_date_fin = first_existing_expr("m", cols_m, ["fin_mandat", "date_fin_mandat", "date_fin"], "NULL")
-
-    query_mandats = f"""
-    SELECT 
-        m.id_orateur,
-        {mandat_leg} AS num_legislature,
-        {mandat_groupe} AS grp_politique,
-        {mandat_dept} AS departement,
-        {mandat_date_debut} AS date_debut_mandat,
-        {mandat_date_fin} AS date_fin_mandat
-    FROM read_parquet('{sql_string(chemins["mandats"])}') m
-    """
-
-    df_mandats = conn.execute(query_mandats).df()
-    df_mandats["grp_politique"] = df_mandats["grp_politique"].fillna("Non renseigné")
-    df_mandats["departement"] = df_mandats["departement"].fillna("Inconnu")
-
-    # CORRECTION BUG 2 : SUPPRESSION DES `pd.to_datetime` QUI CASSAIENT LE FORMAT "DD - MM - YYYY" !
-    # On laisse les dates exactement comme le SQL les a préparées.
-
-    conn.close()
+    # Requête pour la table des mandats
+    query_mandats = "SELECT * FROM dim_mandats;"
+    df_mandats = conn.query(query_mandats)
 
     return df_faits, df_mandats
 
-
-# Chargement global — exécuté une seule fois grâce au cache Streamlit
+# Chargement au lancement
 df_faits, df_mandats_complet = load_all_data()
 
 # On écrase TOUTES les variations de majuscules directement dans la mémoire de l'application !
