@@ -213,20 +213,39 @@ def trouver_coord_departement(dept_raw: str):
 # ---------------------------------------------------------
 # 4. LE CŒUR DU RÉACTEUR : L'ASPIRATION NATIVE (SANS CRASH)
 # ---------------------------------------------------------
+# ---------------------------------------------------------
+# 4. LE CŒUR DU RÉACTEUR : L'ASPIRATION NATIVE ET FILTRÉE
+# ---------------------------------------------------------
 @st.cache_data(ttl="1h") 
 def load_all_data():
-    # 1. On aspire les données brutes (Supabase gère ça en un éclair sans erreur de jointure SQL)
-    df_f = conn.query("SELECT * FROM faits_occurrences LIMIT 100000;", ttl="10m")
+    # 1. On aspire les données brutes SANS LA LIMITE QUI COUPAIT L'HISTOIRE !
+    df_f = conn.query("SELECT * FROM faits_occurrences;", ttl="10m")
     df_o = conn.query("SELECT * FROM dim_orateurs;", ttl="10m")
     df_m = conn.query("SELECT * FROM dim_mandats;", ttl="10m")
     df_t = conn.query("SELECT * FROM dim_temps;", ttl="10m")
     df_th = conn.query("SELECT * FROM dim_theme;", ttl="10m")
 
-    # Fonction de sécurité pour ne jamais crasher si un nom de colonne diffère
+    # Fonction de sécurité pour ne jamais crasher
     def get_col(df, candidats):
         for c in candidats:
             if c in df.columns: return c
         return None
+
+    # =================================================================
+    # 🛡️ RESTAURATION DES FILTRES IA (Pour nettoyer les graphiques !)
+    # =================================================================
+    c_statut = get_col(df_f, ["ia_filtre_statut", "filtre_statut", "statut"])
+    if c_statut:
+        df_f = df_f[df_f[c_statut].fillna('retenu').astype(str).str.lower() == 'retenu']
+        
+    c_clu = get_col(df_f, ["cluster_id", "ia_cluster_id"])
+    if c_clu:
+        df_f = df_f[pd.to_numeric(df_f[c_clu], errors='coerce').fillna(0) != -1]
+        
+    c_rhet = get_col(df_f, ["est_rhetorique_migratoire", "est_rhétorique_migratoire"])
+    if c_rhet:
+        df_f = df_f[df_f[c_rhet].astype(str).str.lower().isin(['true', '1', 'oui', '1.0', 't'])]
+    # =================================================================
 
     # --- IDENTIFICATION DES CLÉS ---
     c_f_orateur = get_col(df_f, ["id_orateur", "acteur_id"])
@@ -246,7 +265,6 @@ def load_all_data():
         df_merged[c_f_orateur] = df_merged[c_f_orateur].astype(str).str.replace(r'\D', '', regex=True)
         df_o_sub = df_o.copy()
         df_o_sub[c_o_id] = df_o_sub[c_o_id].astype(str).str.replace(r'\D', '', regex=True)
-        # On ne garde que les colonnes utiles de l'orateur
         cols_o = [c for c in [c_o_id, get_col(df_o, ["nom_orateur", "nom"]), get_col(df_o, ["date_naissance"]), get_col(df_o, ["date_deces"])] if c]
         if c_f_orateur == c_o_id:
             df_merged = df_merged.merge(df_o_sub[cols_o], on=c_f_orateur, how="left")
@@ -274,7 +292,7 @@ def load_all_data():
         else:
             df_merged = df_merged.merge(df_th[cols_th], left_on=c_f_theme, right_on=c_th_id, how="left")
 
-    # --- CONSTITUTION DU DF FINAL (SÉCURISÉ) ---
+    # --- CONSTITUTION DU DF FINAL ---
     df_final = pd.DataFrame()
 
     c_occ = get_col(df_merged, ["id_occurrence", "id_occurence"])
@@ -298,17 +316,13 @@ def load_all_data():
     df_final["score_ia"] = pd.to_numeric(df_merged[c_sco] if c_sco else 0, errors="coerce").fillna(0)
     df_final["cluster_id"] = df_merged[c_clu] if c_clu else 0
     df_final["id_orateur"] = df_merged[c_f_orateur] if c_f_orateur else "Inconnu"
-
-    # Données Fiche Député (qui faisaient crasher la page 2 avant !)
     df_final["nom_orateur"] = df_merged[c_nom] if c_nom else "Inconnu"
     df_final["date_naissance"] = df_merged[c_nai] if c_nai else np.nan
     df_final["date_deces"] = df_merged[c_dec] if c_dec else np.nan
-
     df_final["grp_politique"] = df_merged[c_grp] if c_grp else "Non renseigné"
     df_final["famille_politique"] = df_merged[c_fam] if c_fam else "Non renseignée / Autres"
     df_final["departement"] = df_merged[c_dep] if c_dep else "Inconnu"
 
-    # Dates
     if c_ann:
         df_final["annee"] = pd.to_numeric(df_merged[c_ann], errors="coerce")
     elif c_dat:
@@ -317,11 +331,9 @@ def load_all_data():
         df_final["annee"] = 2000
     df_final["date_seance"] = df_merged[c_dat] if c_dat else np.nan
 
-    # Thèmes
     df_final["libelle_theme"] = df_merged[c_lib] if c_lib else "Non renseigné"
     df_final["theme"] = df_final["libelle_theme"]
 
-    # --- NETTOYAGE COSMÉTIQUE ---
     df_final["grp_politique"] = df_final["grp_politique"].fillna("Non renseigné")
     df_final["famille_politique"] = df_final["famille_politique"].replace(["Non renseignée / Autres", "Non renseigné", "NULL", "", None], np.nan)
     df_final["famille_politique"] = df_final["famille_politique"].fillna("Non renseignée / Autres")
@@ -329,7 +341,6 @@ def load_all_data():
     df_final["departement"] = df_final["departement"].fillna("Inconnu")
     df_final["libelle_theme"] = df_final["libelle_theme"].fillna("Non renseigné")
 
-    # Table Mandats : On renomme l'id pour que la Page 2 puisse filtrer correctement
     df_mandats_out = df_m.copy()
     c_m_orateur = get_col(df_mandats_out, ["id_orateur", "id_acteur"])
     if c_m_orateur and c_m_orateur != "id_orateur":
