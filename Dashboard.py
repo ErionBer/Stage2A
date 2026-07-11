@@ -1,13 +1,11 @@
 import streamlit as st
 import pandas as pd
-import duckdb
 import plotly.express as px
 import unicodedata
 import numpy as np
 
-duckdb.sql("PRAGMA threads=2;")
-duckdb.sql("PRAGMA memory_limit='500MB';")
-duckdb.sql("PRAGMA temp_directory='duckdb_swap_space';")
+conn = st.connection("supabase", type="sql")
+
 # ---------------------------------------------------------
 # 1. CONFIGURATION DE LA PAGE
 # ---------------------------------------------------------
