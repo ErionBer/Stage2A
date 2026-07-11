@@ -593,6 +593,7 @@ def load_all_data():
     LEFT JOIN read_parquet('{sql_string(chemins["seance"])}') s 
         ON f.id_seance = s.id_seance
     {where_sql}
+    LIMIT 100000
     """
 
     try:
